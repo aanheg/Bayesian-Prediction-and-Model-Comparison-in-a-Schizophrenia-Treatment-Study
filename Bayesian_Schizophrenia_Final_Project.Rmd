@@ -1,0 +1,587 @@
+---
+title: "Bayesian Prediction and Model Comparison in a Schizophrenia
+Treatment Study"
+author: "Gehna Anand"
+date: "2025-11-19"
+output: pdf_document
+---
+
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+
+library(mvtnorm)
+library(ggplot2)
+```
+
+
+# Executive Summary
+
+This project uses Bayesian methods to analyze a randomized clinical trial of an antipsychotic drug versus placebo in patients with schizophrenia. The primary outcome is the IMPS79 symptom severity score (1–7, higher = worse), measured repeatedly from baseline (Week 0) through Week 6.
+
+The analysis addresses four goals: (1) assess whether the drug and placebo groups are comparable at baseline; (2) model longitudinal symptom trajectories using a hierarchical regression with patient-specific random intercepts; (3) obtain the posterior predictive distribution for a new patient&#39;s IMPS79 at Week 6 under each treatment and compute the probability of achieving a clinically good outcome; and (4) compare several regression models for change from baseline to Week 6 using Bayesian model comparison.
+
+The results suggest that the randomized groups are well balanced at baseline, with the posterior mean difference in baseline IMPS79 close to zero and a 95% credible interval that comfortably includes 0. In the longitudinal model, both drug and placebo arms improve over time, but the drug arm improves substantially faster: drug patients show a much steeper average decline in IMPS79 than placebo patients. For a new patient, the probability of being mildly ill or better at Week 6 (IMPS79 $\leq$ 3) is estimated to be about 0.55 under drug versus 0.17 under placebo, implying a roughly 0.4 increase in the chance of a good outcome with the drug. Finally, for change from Week 0 to Week 6, Bayesian model comparison overwhelmingly favors a regression model that includes both treatment and baseline severity, indicating that baseline symptoms remain an important predictor of improvement even after randomization.
+
+
+# Introduction
+
+Schizophrenia is a chronic psychiatric disorder often treated with antipsychotic medications, but the size and time course of treatment effects can be difficult to quantify, especially when symptoms are measured on coarse clinical scales. The dataset analyzed here comes from a randomized clinical trial comparing an antipsychotic drug with placebo, with symptom severity recorded repeatedly over 6 weeks using the IMPS79 scale (1–7, higher = worse).
+
+From a statistical perspective, the trial is an opportunity to illustrate how Bayesian methods can be used to model longitudinal outcomes, quantify uncertainty about treatment effects, and make predictions for future patients. In this project I use normal-error regression and hierarchical models, treating IMPS79 as approximately continuous, in order to (i) assess baseline comparability between treatment arms, (ii) characterize average symptom trajectories over time while allowing for patient-specific heterogeneity, (iii) obtain posterior predictive distributions for new patients at Week 6 under each treatment, and (iv) compare alternative regression models for change from baseline to Week 6.
+
+
+
+
+
+# Description of Data
+
+
+```{r results='hide'}
+
+path <- "D:/Laptop/Desktop/IUB/SEM/Sem3/Bayesian/Project/Datasets/Schizophrenia"
+data<-load(file.path(path, "schizophrenia.rda"))
+sch <- get(data)
+str(sch)
+head(sch)
+
+```
+
+
+```{r results='hide'}
+
+# keep only variables we need
+dat <- schizophrenia[, c("id", "Week", "TxDrug", "imps79")]
+dat$id     <- factor(dat$id)
+dat$TxDrug <- factor(dat$TxDrug, levels = c(0,1),
+                     labels = c("Placebo","Drug"))
+
+table(dat$Week, dat$TxDrug)
+tapply(dat$imps79, list(dat$Week, dat$TxDrug), mean, na.rm = TRUE)
+
+
+```
+
+The dataset contains 1,603 observations from a randomized clinical trial of an antipsychotic drug for schizophrenia. Each observation corresponds to a visit for a particular patient at a given week. The main variables used in this analysis are:
+
+- `id`: patient identifier (used for random intercepts)
+- `Week`: follow-up time since baseline in weeks (0, 1, 2, 3, 4, 5, or 6)
+- `TxDrug`: treatment assignment, with levels Placebo and Drug
+- `imps79`: IMPS79 symptom severity score on a 1–7 scale (higher values indicate more severe symptoms)
+
+Most patients are observed at baseline and at Weeks 1, 3, and 6, with fewer visits at some intermediate weeks and some missing follow-up measurements. IMPS79 is technically an ordinal scale, but in this project it is treated as approximately continuous to allow the use of normal-error regression and hierarchical models covered in the course. Missing visits are handled by using all available data under an implicit missing-at-random assumption.
+
+
+# Bayesian statistical analyses
+
+## AIM 1: Baseline Comparability
+
+
+
+The first question is whether the drug and placebo groups are comparable at baseline in terms of IMPS79. I restrict the data to Week 0 and fit independent two-group normal models for the mean baseline IMPS79 in each arm. For group \(k \in \{\text{Placebo}, \text{Drug}\}\) with observations \(y_{k1},\ldots,y_{kn_k}\), I assume
+
+\[
+y_{kj} \mid \mu_k, \sigma_k^2 \sim \mathcal{N}(\mu_k, \sigma_k^2),
+\]
+
+with a conjugate normal–inverse-gamma prior \((\mu_k, \sigma_k^2) \sim \text{NIG}(m_0, k_0, a_0, b_0)\). Using the closed-form posterior, I draw from the posterior distribution of \(\mu_k\) for each arm and then examine the posterior of the difference \(\Delta = \mu_{\text{Drug}} - \mu_{\text{Placebo}}\). I also plot the empirical baseline distributions by treatment.
+
+
+```{r}
+
+base <- subset(dat, Week == 0)
+
+yP <- base$imps79[base$TxDrug == "Placebo"]
+yD <- base$imps79[base$TxDrug == "Drug"]
+
+post_group <- function(y, m0 = 60, k0 = 0.01, a0 = 2, b0 = 50, S = 20000){
+  n  <- length(y)
+  yb <- mean(y); s2 <- var(y)
+
+  kn <- k0 + n
+  mn <- (k0*m0 + n*yb)/kn
+  an <- a0 + n/2
+  bn <- b0 + 0.5*((n-1)*s2 + (k0*n/kn)*(yb - m0)^2)
+
+  sig2 <- 1/rgamma(S, shape = an, rate = bn)   # IG(a,b)
+  mu   <- rnorm(S, mn, sqrt(sig2/kn))
+  list(mu = mu, sig2 = sig2)
+}
+
+set.seed(1)
+postP <- post_group(yP)
+postD <- post_group(yD)
+
+Delta <- postD$mu - postP$mu
+
+#mean(Delta)
+#quantile(Delta, c(.025,.5,.975))
+
+
+```
+
+
+```{r}
+# 1a. Observed baseline IMPS by treatment
+ggplot(base, aes(x = imps79, fill = TxDrug)) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 15) +
+  labs(x = "Baseline IMPS79", y = "Count",
+       title = "Baseline IMPS79 by Treatment") +
+  theme_minimal()
+
+# 1b. Posterior for difference in means (Drug - Placebo)
+Delta_df <- data.frame(Delta = Delta)
+
+ggplot(Delta_df, aes(x = Delta)) +
+  geom_density() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(x = "mean_Drug - mean_Placebo (baseline)",
+       y = "Posterior density",
+       title = "Posterior for Baseline Mean Difference") +
+  theme_minimal()
+```
+
+
+### Aim 1 results
+
+The baseline histograms for drug and placebo look very similar, with most patients starting around IMPS79 values between 4 and 6.
+
+The posterior mean difference in baseline means is
+
+\[
+\mathbb{E}[\Delta \mid y] \approx 0.02,
+\]
+
+with a 95% credible interval approximately \([-0.27,\ 0.30]\).
+
+This interval is wide and comfortably contains 0, indicating no meaningful baseline imbalance. In other words, conditional on the model and priors, the two groups appear comparable in mean symptom severity at Week 0, which supports interpreting subsequent differences as treatment effects rather than pre-existing differences.
+
+## Aim 2: Hierarchical regression with random intercepts
+
+
+To study trajectories over time, I fit a linear mixed model with a random intercept for each patient. Let \(y_{ij}\) denote IMPS79 for patient \(i\) at visit \(j\). The fixed-effect covariates are Week, treatment, and their interaction:
+
+\[
+y_{ij} = \beta_0 + \beta_1 \text{Week}_{ij}
+       + \beta_2 I(\text{Drug}_i)
+       + \beta_3 \bigl(\text{Week}_{ij} \times I(\text{Drug}_i)\bigr)
+       + b_i + \varepsilon_{ij},
+\]
+
+where \(b_i \sim \mathcal{N}(0, \tau^2)\) are patient-specific random intercepts and \(\varepsilon_{ij} \sim \mathcal{N}(0, \sigma^2)\) are residual errors. Thus \(\beta_1\) represents the average weekly change in IMPS79 for placebo patients and \(\beta_3\) captures the additional change per week in the drug arm.
+
+I place diffuse normal priors on \(\beta\) and inverse-gamma priors on \(\sigma^2\) and \(\tau^2\), and sample from the joint posterior using a Gibbs sampler (20,000 iterations with the first 5,000 discarded as burn-in). Trace plots for all fixed effects and variance components show good mixing and no obvious trends, suggesting that the MCMC has converged to the stationary distribution.
+
+
+```{r}
+
+# Build matrices
+X <- model.matrix(~ Week * TxDrug, data = dat)      # (Intercept), Week, TxDrugDrug, Week:TxDrugDrug
+y <- dat$imps79
+id <- dat$id
+N  <- nlevels(id)
+n  <- length(y)
+
+# Priors
+p  <- ncol(X)
+m0 <- rep(0, p)
+V0 <- diag(1e4, p)
+V0_inv <- solve(V0)
+
+a0 <- 2; b0 <- 50    # for sigma^2
+c0 <- 2; d0 <- 50    # for tau^2
+
+# Storage
+S <- 20000
+beta_store <- matrix(NA, S, p)
+sigma2_store <- tau2_store <- numeric(S)
+
+# Initialize
+beta  <- rep(0, p)
+b_i   <- rep(0, N)
+sigma2 <- 1
+tau2   <- 1
+
+set.seed(123)
+
+for (s in 1:S) {
+
+  ## 1. sample beta
+  Zb   <- b_i[as.integer(id)]
+  Vbeta_inv <- V0_inv + crossprod(X)/sigma2
+  Vbeta <- solve(Vbeta_inv)
+  mbeta <- Vbeta %*% (V0_inv %*% m0 + crossprod(X, y - Zb)/sigma2)
+  beta <- as.numeric(mvtnorm::rmvnorm(1, mbeta, Vbeta))
+
+  ## 2. sample b_i for each patient
+  for (k in 1:N) {
+    idx <- which(id == levels(id)[k])
+    n_k <- length(idx)
+    y_k <- y[idx]
+    X_k <- X[idx, , drop = TRUE]
+
+    vk <- 1 / (n_k/sigma2 + 1/tau2)
+    mk <- vk * sum(y_k - X_k %*% beta)/sigma2
+    b_i[k] <- rnorm(1, mk, sqrt(vk))
+  }
+
+  ## 3. sample sigma^2
+  mu <- as.numeric(X %*% beta + b_i[as.integer(id)])
+  rss <- sum((y - mu)^2)
+  sigma2 <- 1 / rgamma(1, shape = a0 + n/2, rate = b0 + rss/2)
+
+  ## 4. sample tau^2
+  ssb <- sum(b_i^2)
+  tau2 <- 1 / rgamma(1, shape = c0 + N/2, rate = d0 + ssb/2)
+
+  beta_store[s, ]   <- beta
+  sigma2_store[s]   <- sigma2
+  tau2_store[s]     <- tau2
+}
+
+# Discard burn-in
+burn <- 5000
+beta_post   <- beta_store[(burn+1):S, ]
+sigma2_post <- sigma2_store[(burn+1):S]
+tau2_post   <- tau2_store[(burn+1):S]
+
+
+
+```
+
+```{r}
+par(mfrow = c(2, 2))
+for (j in 1:ncol(beta_post)) {
+  plot(beta_post[, j], type = "l",
+       main = paste("Trace of", colnames(X)[j]),
+       xlab = "Iteration", ylab = "Value")
+}
+par(mfrow = c(1, 1))
+
+# Trace plots for sigma^2 and tau^2
+par(mfrow = c(1, 2))
+plot(sigma2_post, type = "l", main = "Trace of sigma^2",
+     xlab = "Iteration", ylab = "sigma^2")
+plot(tau2_post, type = "l", main = "Trace of tau^2",
+     xlab = "Iteration", ylab = "tau^2")
+par(mfrow = c(1, 1))
+
+```
+
+
+```{r}
+
+colMeans(beta_post)
+apply(beta_post, 2, quantile, c(.025,.5,.975))
+
+mean(tau2_post); quantile(tau2_post, c(.025,.975))
+
+```
+
+```{r}
+
+beta_df <- as.data.frame(beta_post)
+colnames(beta_df) <- colnames(X)
+
+beta_long <- reshape(
+  beta_df,
+  direction = "long",
+  varying = list(1:ncol(beta_df)),
+  v.names = "value",
+  timevar = "coef",
+  times = colnames(beta_df)
+)
+
+ggplot(beta_long, aes(x = value)) +
+  geom_density(fill = "grey80") +
+  facet_wrap(~ coef, scales = "free") +
+  labs(x = "Posterior value", y = "Density",
+       title = "Posterior densities of regression coefficients") +
+  theme_minimal()
+
+
+```
+
+
+The posterior density plots show the Week and Week×Drug coefficients concentrated well below zero, reinforcing that both groups improve and the drug improves faster.
+
+
+```{r}
+# grid of weeks and treatment
+week_grid <- sort(unique(dat$Week))
+pred_grid <- expand.grid(
+  Week   = week_grid,
+  TxDrug = c("Placebo", "Drug")
+)
+
+Xgrid <- model.matrix(~ Week * TxDrug, data = pred_grid)
+
+# posterior draws for linear predictor (no random intercept)
+eta_draws <- beta_post %*% t(Xgrid)   # S_post x n_grid
+
+mean_eta <- apply(eta_draws, 2, mean)
+lwr_eta  <- apply(eta_draws, 2, quantile, 0.025)
+upr_eta  <- apply(eta_draws, 2, quantile, 0.975)
+
+pred_plot_df <- cbind(
+  pred_grid,
+  mean = mean_eta,
+  lwr  = lwr_eta,
+  upr  = upr_eta
+)
+
+ggplot(pred_plot_df,
+       aes(x = Week, y = mean, colour = TxDrug, fill = TxDrug)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr), alpha = 0.2, colour = NA) +
+  labs(x = "Week",
+       y = "Mean IMPS79 (population level)",
+       title = "Posterior mean trajectories with 95% credible bands") +
+  theme_minimal()
+  
+```
+
+### Aim 2 results
+
+Posterior summaries for the fixed effects are:
+
+- Intercept: posterior mean $\approx$ 5.26, 95% CrI [5.02, 5.50]
+- Week effect (placebo slope): $mean \approx -0.15$, 95% CrI [-0.20, -0.10]
+- Drug main effect (baseline difference): mean $\approx$ -0.19, 95% CrI [-0.47, 0.08]
+- Week × Drug interaction: mean $\approx$ -0.22, 95% CrI [-0.27, -0.17]  
+
+The negative Week effect indicates that, on average, placebo patients improve slightly over time (IMPS79 decreases by about 0.15 points per week). The interaction term is also clearly negative, meaning that the decline in IMPS79 is steeper for drug patients. Combining the Week and interaction coefficients, drug patients improve by roughly $0.15 + 0.22 \approx 0.37$ IMPS79 points per week on the population level, more than twice the average rate of improvement in the placebo arm.
+
+The posterior for \(\tau^2\) is centered near 1.0 with a fairly narrow credible interval, suggesting substantial between-patient heterogeneity in baseline severity that is captured by the random intercepts. The residual variance \(\sigma^2\) has posterior draws concentrated around values close to 1, indicating that the normal error assumption is at least roughly compatible with the observed variability. 
+
+Posterior mean trajectories with 95% credible bands show both treatments improving over time, but with clearly lower mean IMPS79 in the drug arm by Weeks 3 and 6. This model therefore supports a clinically meaningful benefit of the drug on longitudinal symptom trajectories.
+
+
+
+## Aim 3: Posterior prediction for a new patient at Week 6
+
+```{r}
+
+# design rows for new patient at Week 6
+x_new_placebo <- c(1, Week = 6, TxDrugDrug = 0, `Week:TxDrugDrug` = 0)
+x_new_drug    <- c(1, Week = 6, TxDrugDrug = 1, `Week:TxDrugDrug` = 6)
+
+S_post <- nrow(beta_post)
+c_thr  <- 3   # choose threshold
+
+good_P <- good_D <- logical(S_post)
+
+set.seed(321)
+for (s in 1:S_post) {
+  beta_s   <- beta_post[s, ]
+  sigma2_s <- sigma2_post[s]
+  tau2_s   <- tau2_post[s]
+
+  b_new <- rnorm(1, 0, sqrt(tau2_s))
+
+  muP <- sum(x_new_placebo * beta_s) + b_new
+  muD <- sum(x_new_drug    * beta_s) + b_new
+
+  yP <- rnorm(1, muP, sqrt(sigma2_s))
+  yD <- rnorm(1, muD, sqrt(sigma2_s))
+
+  good_P[s] <- yP <= c_thr
+  good_D[s] <- yD <= c_thr
+}
+
+prob_good_P <- mean(good_P)
+prob_good_D <- mean(good_D)
+prob_diff   <- prob_good_D - prob_good_P
+
+prob_good_P
+prob_good_D
+quantile(prob_diff, c(.025,.5,.975))
+
+
+```
+
+
+Using draws from the hierarchical model, I next consider a hypothetical new patient starting treatment at baseline. For each posterior draw \((\beta, \sigma^2, \tau^2)\), I simulate a new patient-specific intercept \(b_{\text{new}} \sim \mathcal{N}(0,\tau^2)\) and then generate predictive IMPS79 values at Week 6 under placebo and drug. I focus on the probability that the patient is at most mildly ill at Week 6, corresponding to IMPS79 $\leq$ 3.
+
+Across posterior draws, the estimated probabilities of being at or below this threshold are
+
+- \(\Pr(\text{IMPS79 at Week 6 } \leq 3 \mid \text{Placebo}) \approx 0.17\)
+- \(\Pr(\text{IMPS79 at Week 6} \leq 3 \mid \text{Drug}) \approx 0.55\)
+
+and the posterior for the difference in these probabilities is concentrated near 0.38, with a 95% credible interval essentially [0.38, 0.38] due to Monte Carlo precision.
+
+Thus, under this model, a new drug-treated patient has roughly a 55% chance of being mildly ill or better at Week 6, compared with only about 17% under placebo. The posterior mass for the difference in probabilities is overwhelmingly positive, giving strong Bayesian evidence that the drug substantially increases the chance of a good clinical outcome by Week 6.
+
+
+
+
+## Aim 4: Model comparison for change from baseline to Week 6
+
+
+
+```{r}
+log_marg_like <- function(y, X, a0 = 2, b0 = 50) {
+  y <- as.numeric(y)
+  X <- as.matrix(X)
+  n <- length(y)
+  p <- ncol(X)
+
+  # diffuse prior: alpha ~ N(0, 10^4 I), sigma^2 ~ IG(a0, b0)
+  m0 <- matrix(0, nrow = p, ncol = 1)
+  V0 <- diag(1e4, p)
+  V0_inv <- solve(V0)
+
+  y_mat <- matrix(y, ncol = 1)
+
+  Vn_inv <- V0_inv + crossprod(X)
+  Vn     <- solve(Vn_inv)
+  mn     <- Vn %*% (V0_inv %*% m0 + crossprod(X, y_mat))
+
+  an <- a0 + n / 2
+  bn <- b0 + 0.5 * (
+    crossprod(y_mat) +
+      t(m0) %*% V0_inv %*% m0 -
+      t(mn) %*% Vn_inv %*% mn
+  )
+
+  an <- as.numeric(an)
+  bn <- as.numeric(bn)
+
+  val <- -n / 2 * log(2 * pi) +
+    0.5 * (log(det(V0_inv)) - log(det(Vn_inv))) +
+    a0 * log(b0) - an * log(bn) +
+    lgamma(an) - lgamma(a0)
+
+  as.numeric(val)
+}
+
+
+```
+
+
+```{r}
+
+# wide-ish: baseline and week 6 per id
+base6 <- subset(dat, Week %in% c(0,6))
+base6_w <- reshape(base6, idvar = "id", timevar = "Week",
+                   direction = "wide")
+
+base6_w$TxDrug <- base6_w$TxDrug.0
+base6_w$Delta  <- base6_w$imps79.6 - base6_w$imps79.0
+
+# *** drop rows without both weeks / TxDrug ***
+base6_w <- base6_w[complete.cases(base6_w[, c("Delta","TxDrug","imps79.0")]), ]
+
+y  <- base6_w$Delta
+
+X1 <- matrix(1, nrow = length(y), ncol = 1)
+X2 <- model.matrix(~ TxDrug, data = base6_w)
+X3 <- model.matrix(~ TxDrug + imps79.0, data = base6_w)
+
+logml1 <- log_marg_like(y, X1)
+logml2 <- log_marg_like(y, X2)
+logml3 <- log_marg_like(y, X3)
+
+logml <- c(M1 = logml1, M2 = logml2, M3 = logml3)
+
+ml_rel <- exp(logml - max(logml))
+post_model_prob <- ml_rel / sum(ml_rel)
+#post_model_prob
+
+
+```
+
+
+
+
+For patients observed at both baseline and Week 6, I define a change score
+\(\Delta_i = \text{IMPS79}_{i,6} - \text{IMPS79}_{i,0}\). Larger negative values of \(\Delta_i\) correspond to greater improvement. I then compare three normal regression models for \(\Delta_i\):
+
+1. **Model 1 (M1):** intercept-only, no treatment effect  
+   \(\Delta_i = \alpha_0 + \varepsilon_i\)
+2. **Model 2 (M2):** treatment effect only  
+   \(\Delta_i = \alpha_0 + \alpha_1 I(\text{Drug}_i) + \varepsilon_i\)
+3. **Model 3 (M3):** treatment plus baseline severity  
+   \(\Delta_i = \alpha_0 + \alpha_1 I(\text{Drug}_i) + \alpha_2 \text{Baseline}_i + \varepsilon_i\)
+
+with diffuse normal priors on \(\alpha\) and an inverse-gamma prior on \(\sigma^2\). Using the closed-form marginal likelihood for the normal regression model, I compute posterior model probabilities \(p(M_k \mid \Delta)\) under equal prior probabilities for the three models.
+
+The resulting posterior model probabilities are approximately:
+
+- \(p(M1 \mid \Delta) \approx 7.3 \times 10^{-14}\)
+- \(p(M2 \mid \Delta) \approx 7.6 \times 10^{-9}\)
+- \(p(M3 \mid \Delta) \approx 1.00\).
+
+Model 3 receives essentially all posterior weight, indicating overwhelming evidence that both treatment and baseline severity are needed to explain change from Week 0 to Week 6. In particular, conditioning on baseline controls for initial differences in severity and yields a more precise assessment of the treatment effect on change scores.
+
+
+
+### Aim 4 – Model comparison plot
+
+
+```{r}
+
+
+model_df <- data.frame(
+  Model = names(post_model_prob),
+  Prob  = as.numeric(post_model_prob)
+)
+
+ggplot(model_df, aes(x = Model, y = Prob)) +
+  geom_col() +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Model",
+       y = "Posterior model probability",
+       title = "Bayesian model comparison (change in IMPS79 0–6 weeks)") +
+  theme_minimal()
+
+```
+
+
+# Subject matter implications
+
+The Bayesian analyses consistently indicate that the antipsychotic drug provides a clinically meaningful benefit compared with placebo. The longitudinal mixed model shows that IMPS79 scores decline over time in both groups, but with a much steeper average decline in the drug arm, implying faster symptom improvement for treated patients. The posterior predictive analysis suggests that, for a new patient, treatment with the drug more than triples the probability of being at most mildly ill (IMPS79 $\leq$ 3) by Week 6.
+
+From a clinical perspective, these results support the effectiveness of the drug in reducing symptom severity over a relatively short 6-week period. The strong preference for the model that includes both treatment and baseline severity also underscores the importance of considering patients’ initial symptom levels when evaluating and comparing treatment effects. Patients starting with more severe symptoms are less likely to achieve a good outcome, even under the drug, highlighting the need for early intervention and possibly more intensive treatment strategies for the most severely ill individuals.
+
+
+
+# Discussion and conclusions
+
+This project applied Bayesian normal and hierarchical models to a longitudinal schizophrenia treatment trial comparing an antipsychotic drug with placebo. The baseline analysis showed that the two arms were well balanced in mean IMPS79 at Week 0, so subsequent differences can reasonably be interpreted as treatment effects rather than pre-existing imbalances.
+
+The random-intercept model for IMPS79 trajectories revealed that both groups improved over time, but the drug group improved substantially faster: the average weekly decline in IMPS79 was more than twice as large for drug patients as for placebo patients. Posterior predictive simulations suggested that a new drug-treated patient has roughly a 55% chance of being mildly ill or better at Week 6, compared with only about 17% under placebo, corresponding to an increase of about 0.38 in the probability of a good outcome.
+
+Model comparison for the change from baseline to Week 6 strongly favored a regression that included both treatment and baseline severity, with essentially all posterior probability assigned to the most flexible model. This reinforces the idea that baseline symptom level remains an important predictor of subsequent change even in a randomized trial.
+
+Several limitations are worth noting. IMPS79 is an ordinal scale, and treating it as continuous with normal errors is a simplification; a more refined analysis could use ordinal or latent-variable models. Missing follow-up visits were implicitly assumed to be missing at random, which may not hold if dropout is related to unobserved outcomes. Finally, the linear time trend used here may not capture more complex patterns of improvement beyond 6 weeks.
+
+Despite these caveats, the Bayesian analyses consistently support a clinically meaningful benefit of the drug on symptom severity, both in terms of average trajectories and the probability of achieving a good clinical status by Week 6.
+
+
+# Further questions and future work
+
+This study raises several questions that could be explored in future work or follow-up experiments:
+
+1. **Ordinal or latent-variable models.** IMPS79 is an ordered categorical scale, but here it was treated as continuous with normal errors. A natural extension would be to fit a cumulative logit or probit model, or a latent-variable normal model, to respect the ordinal nature of the outcome and assess whether the conclusions about the treatment effect change.
+
+2. **Random slopes and more flexible trajectories.** The current hierarchical model includes random intercepts but assumes a common slope structure within each treatment arm. Allowing patient-specific random slopes for time, or using nonlinear time effects, could capture more complex patterns of improvement and better quantify heterogeneity in treatment response.
+
+3. **Dropout and missing data mechanisms.** Some patients have missing follow-up visits. The analysis implicitly assumes that these data are missing at random. A follow-up study could investigate more realistic missing-not-at-random mechanisms, for example by jointly modeling dropout and symptom trajectories.
+
+4. **Predictors of differential treatment response.** Baseline severity is an important predictor of change, but other covariates (e.g., age, duration of illness, comorbidities) might also modify the treatment effect. With richer data, one could extend the Bayesian model to study which patient characteristics are associated with better or worse response to the drug.
+
+5. **Longer-term outcomes.** The trial covers only 6 weeks. It would be scientifically valuable to conduct a longer-term study to see whether the benefits of the drug persist, increase, or taper off over several months, and how this interacts with relapse and adherence.
+
+# Appendix
+
+## Appendix A: Code and reproducibility
+
+The full report with R code used for this analysis is provided in the accompanying files:
+
+- `Schizophrenia Final Project with Code.Rmd` (source document for this report)
+
+These files contain all data-loading steps, model specifications, MCMC sampling code, and plotting commands needed to reproduce the results in this report.
+
