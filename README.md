@@ -1,4 +1,5 @@
 # Bayesian Prediction and Model Comparison in a Schizophrenia Treatment Study
+*Completed in Dec 2025*
 
 A Bayesian analysis of a randomized clinical trial comparing an antipsychotic drug versus placebo in patients with schizophrenia. Symptom severity (IMPS79, scale 1–7) was measured repeatedly from baseline through Week 6.
 
